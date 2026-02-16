@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { CheckCircle2, XCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CheckCircle2, XCircle, ChevronLeft, ChevronRight, Filter, X } from 'lucide-react';
 import { getAWSIcon } from '@/components/aws-icons';
 import { domains, type Flashcard, type CardProgress, type Domain } from '@/data';
 
@@ -28,30 +28,46 @@ const initDB = (): Promise<IDBDatabase> => {
 };
 
 const saveProgress = async (cardId: string, data: Omit<CardProgress, 'id'>) => {
-  const db = await initDB();
-  const transaction = db.transaction([STORE_NAME], 'readwrite');
-  const store = transaction.objectStore(STORE_NAME);
-  store.put({ id: cardId, ...data });
+  try {
+    const db = await initDB();
+    const transaction = db.transaction([STORE_NAME], 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+    store.put({ id: cardId, ...data });
+  } catch (error) {
+    console.error('Failed to save progress:', error);
+  }
 };
 
 const getProgress = async (cardId: string): Promise<CardProgress> => {
-  const db = await initDB();
-  const transaction = db.transaction([STORE_NAME], 'readonly');
-  const store = transaction.objectStore(STORE_NAME);
-  return new Promise((resolve) => {
-    const request = store.get(cardId);
-    request.onsuccess = () => resolve(request.result || { id: cardId, correct: 0, incorrect: 0, lastReview: null, difficulty: 0 });
-  });
+  try {
+    const db = await initDB();
+    const transaction = db.transaction([STORE_NAME], 'readonly');
+    const store = transaction.objectStore(STORE_NAME);
+    return new Promise((resolve) => {
+      const request = store.get(cardId);
+      request.onsuccess = () => resolve(request.result || { id: cardId, correct: 0, incorrect: 0, lastReview: null, difficulty: 0 });
+      request.onerror = () => resolve({ id: cardId, correct: 0, incorrect: 0, lastReview: null, difficulty: 0 });
+    });
+  } catch (error) {
+    console.error('Failed to get progress:', error);
+    return { id: cardId, correct: 0, incorrect: 0, lastReview: null, difficulty: 0 };
+  }
 };
 
 const getAllProgress = async (): Promise<CardProgress[]> => {
-  const db = await initDB();
-  const transaction = db.transaction([STORE_NAME], 'readonly');
-  const store = transaction.objectStore(STORE_NAME);
-  return new Promise((resolve) => {
-    const request = store.getAll();
-    request.onsuccess = () => resolve(request.result);
-  });
+  try {
+    const db = await initDB();
+    const transaction = db.transaction([STORE_NAME], 'readonly');
+    const store = transaction.objectStore(STORE_NAME);
+    return new Promise((resolve) => {
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve([]);
+    });
+  } catch (error) {
+    console.error('Failed to get all progress:', error);
+    return [];
+  }
 };
 
 // Main App Component
@@ -68,14 +84,63 @@ export default function SAAFlashcardApp() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [showInstallButton, setShowInstallButton] = useState(false);
-  const [cardHeight, setCardHeight] = useState<number | null>(null);
-  const [frontContentRef, setFrontContentRef] = useState<HTMLDivElement | null>(null);
-  const [backContentRef, setBackContentRef] = useState<HTMLDivElement | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  
+  // Filter states
+  const [showFilters, setShowFilters] = useState(false);
+  const [selectedDifficulties, setSelectedDifficulties] = useState<Set<string>>(new Set(['fundamental', 'application', 'advanced']));
+  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set(['flashcard', 'multiple-choice', 'scenario', 'code-analysis', 'concept']));
+  const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
+  const [availableTopics, setAvailableTopics] = useState<string[]>([]);
 
-    // Get cards for the selected task
+  // Refs to prevent infinite loops
+  const initialLoadDone = useRef(false);
+  const prevTaskId = useRef<string | null>(null);
+
+  // Get cards for the selected task
   const selectedTask = selectedDomain?.tasks.find(t => t.id === selectedTaskId);
-  const currentCards = selectedTask?.cards || [];
-  const currentCard = currentCards[currentCardIndex];
+  const allCards = selectedTask?.cards || [];
+  
+  // Filter cards based on selected filters
+  const filteredCards = allCards.filter(card => {
+    const difficultyMatch = selectedDifficulties.has(card.difficulty);
+    const typeMatch = selectedTypes.has(card.type);
+    const topicMatch = selectedTopics.size === 0 || selectedTopics.has(card.topic);
+    return difficultyMatch && typeMatch && topicMatch;
+  });
+  
+  // Ensure currentCardIndex is valid for filtered cards
+  const validCurrentIndex = filteredCards.length > 0 
+    ? Math.min(currentCardIndex, filteredCards.length - 1)
+    : 0;
+  
+  const currentCard = filteredCards[validCurrentIndex];
+
+  // Update available topics when task changes
+  useEffect(() => {
+    if (allCards.length > 0) {
+      const topics = [...new Set(allCards.map(card => card.topic))];
+      setAvailableTopics(topics);
+      // Select all topics by default
+      setSelectedTopics(new Set(topics));
+    } else {
+      setAvailableTopics([]);
+      setSelectedTopics(new Set());
+    }
+  }, [selectedTaskId, allCards.length]); // Only depend on taskId and cards length
+
+  // Reset filters when task changes
+  useEffect(() => {
+    if (prevTaskId.current !== selectedTaskId) {
+      setSelectedDifficulties(new Set(['fundamental', 'application', 'advanced']));
+      setSelectedTypes(new Set(['flashcard', 'multiple-choice', 'scenario', 'code-analysis', 'concept']));
+      setCurrentCardIndex(0);
+      setIsFlipped(false);
+      setSelectedAnswer(null);
+      setShowExplanation(false);
+      prevTaskId.current = selectedTaskId;
+    }
+  }, [selectedTaskId]);
 
   // PWA Install Prompt
   useEffect(() => {
@@ -90,182 +155,299 @@ export default function SAAFlashcardApp() {
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
 
-  // Measure and set consistent card height
+  // Load progress on mount
   useEffect(() => {
-    if (currentCard?.type !== 'multiple-choice') {
-      if (frontContentRef && backContentRef) {
-        const frontHeight = frontContentRef.scrollHeight;
-        const backHeight = backContentRef.scrollHeight;
-        const maxHeight = Math.max(frontHeight, backHeight, 400);
-        (()=>setCardHeight(maxHeight))()
+    const loadProgress = async () => {
+      if (initialLoadDone.current) return;
+      
+      setIsLoading(true);
+      try {
+        const allProgress = await getAllProgress();
+        const progressMap: Record<string, CardProgress> = {};
+        allProgress.forEach(p => {
+          progressMap[p.id] = p;
+        });
+        setProgress(progressMap);
+        
+        // Calculate initial stats
+        const total = allProgress.reduce((sum, p) => sum + p.correct + p.incorrect, 0);
+        const correct = allProgress.reduce((sum, p) => sum + p.correct, 0);
+        const incorrect = allProgress.reduce((sum, p) => sum + p.incorrect, 0);
+        setStats({ total, correct, incorrect });
+        
+        initialLoadDone.current = true;
+      } catch (error) {
+        console.error('Failed to load progress:', error);
+      } finally {
+        setIsLoading(false);
       }
-    } else {
-      (()=>setCardHeight(null))();
-    }
-  }, [currentCard, frontContentRef, backContentRef, isFlipped]);
+    };
+    loadProgress();
+  }, []); // Empty dependency array - only run once
 
   const handleInstallClick = async () => {
     if (!deferredPrompt) return;
 
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
+    try {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
 
-    if (outcome === 'accepted') {
-      setShowInstallButton(false);
+      if (outcome === 'accepted') {
+        setShowInstallButton(false);
+      }
+    } catch (error) {
+      console.error('Install prompt failed:', error);
     }
 
     setDeferredPrompt(null);
   };
 
   // Get all cards for a domain (across all tasks)
-  const getDomainCards = (domain: Domain): Flashcard[] => {
+  const getDomainCards = useCallback((domain: Domain): Flashcard[] => {
     return domain.tasks.flatMap(t => t.cards);
-  };
-
-
-
-  // Load progress on mount
-  useEffect(() => {
-    const loadProgress = async () => {
-      const allProgress = await getAllProgress();
-      const progressMap: Record<string, CardProgress> = {};
-      allProgress.forEach(p => {
-        progressMap[p.id] = p;
-      });
-      setProgress(progressMap);
-    };
-    loadProgress();
   }, []);
 
-  const selectDomain = (domain: Domain) => {
+  const selectDomain = useCallback((domain: Domain) => {
     setSelectedDomain(domain);
     setView('tasks');
-  };
+  }, []);
 
-  const startTask = (taskId: string) => {
+  const startTask = useCallback((taskId: string) => {
     setSelectedTaskId(taskId);
     setView('study');
     setCurrentCardIndex(0);
     setIsFlipped(false);
-    setCardHeight(null);
-  };
+    setSelectedAnswer(null);
+    setShowExplanation(false);
+  }, []);
 
-  const backToPacks = () => {
+  const backToPacks = useCallback(() => {
     setView('packs');
     setSelectedDomain(null);
     setSelectedTaskId(null);
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
-    setCardHeight(null);
-  };
+  }, []);
 
-  const backToTasks = () => {
+  const backToTasks = useCallback(() => {
     setView('tasks');
     setSelectedTaskId(null);
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
-    setCardHeight(null);
-  };
+  }, []);
 
-  const handleCardFlip = () => {
-    setIsFlipped(!isFlipped);
-  };
+  const handleCardFlip = useCallback(() => {
+    setIsFlipped(prev => !prev);
+  }, []);
 
-  const handleKnowIt = async () => {
-    if (!currentCard) return;
-    const cardProgress = await getProgress(currentCard.id);
-    const newProgress = {
-      ...cardProgress,
-      correct: cardProgress.correct + 1,
-      lastReview: new Date().toISOString(),
-      difficulty: Math.max(0, cardProgress.difficulty - 1)
-    };
-    await saveProgress(currentCard.id, newProgress);
-
-    setProgress(prev => ({ ...prev, [currentCard.id]: newProgress }));
-    setStats(prev => ({
-      ...prev,
-      total: prev.total + 1,
-      correct: prev.correct + 1
-    }));
-
-    nextCard();
-  };
-
-  const handleLearning = async () => {
-    if (!currentCard) return;
-    const cardProgress = await getProgress(currentCard.id);
-    const newProgress = {
-      ...cardProgress,
-      incorrect: cardProgress.incorrect + 1,
-      lastReview: new Date().toISOString(),
-      difficulty: cardProgress.difficulty + 1
-    };
-    await saveProgress(currentCard.id, newProgress);
-
-    setProgress(prev => ({ ...prev, [currentCard.id]: newProgress }));
-    setStats(prev => ({
-      ...prev,
-      total: prev.total + 1,
-      incorrect: prev.incorrect + 1
-    }));
-
-    nextCard();
-  };
-
-  const handleMultipleChoice = async (optionIndex: number) => {
-    setSelectedAnswer(optionIndex);
-    setShowExplanation(true);
-
-    const isCorrect = optionIndex === currentCard.correctAnswer;
-    const cardProgress = await getProgress(currentCard.id);
-    const newProgress = {
-      ...cardProgress,
-      correct: isCorrect ? cardProgress.correct + 1 : cardProgress.correct,
-      incorrect: isCorrect ? cardProgress.incorrect : cardProgress.incorrect + 1,
-      lastReview: new Date().toISOString(),
-      difficulty: isCorrect ? Math.max(0, cardProgress.difficulty - 1) : cardProgress.difficulty + 1
-    };
-    await saveProgress(currentCard.id, newProgress);
-
-    setProgress(prev => ({ ...prev, [currentCard.id]: newProgress }));
+  const updateStatsAndProgress = useCallback((isCorrect: boolean) => {
     setStats(prev => ({
       total: prev.total + 1,
       correct: isCorrect ? prev.correct + 1 : prev.correct,
       incorrect: isCorrect ? prev.incorrect : prev.incorrect + 1
     }));
-  };
+  }, []);
 
-  const nextCard = () => {
+  const handleKnowIt = useCallback(async () => {
+    if (!currentCard) return;
+    
+    try {
+      const cardProgress = await getProgress(currentCard.id);
+      const newProgress = {
+        ...cardProgress,
+        correct: cardProgress.correct + 1,
+        lastReview: new Date().toISOString(),
+        difficulty: Math.max(0, cardProgress.difficulty - 1)
+      };
+      await saveProgress(currentCard.id, newProgress);
+
+      setProgress(prev => ({ ...prev, [currentCard.id]: newProgress }));
+      updateStatsAndProgress(true);
+    } catch (error) {
+      console.error('Failed to save progress:', error);
+    }
+
+    nextCard();
+  }, [currentCard, updateStatsAndProgress]);
+
+  const handleLearning = useCallback(async () => {
+    if (!currentCard) return;
+    
+    try {
+      const cardProgress = await getProgress(currentCard.id);
+      const newProgress = {
+        ...cardProgress,
+        incorrect: cardProgress.incorrect + 1,
+        lastReview: new Date().toISOString(),
+        difficulty: cardProgress.difficulty + 1
+      };
+      await saveProgress(currentCard.id, newProgress);
+
+      setProgress(prev => ({ ...prev, [currentCard.id]: newProgress }));
+      updateStatsAndProgress(false);
+    } catch (error) {
+      console.error('Failed to save progress:', error);
+    }
+
+    nextCard();
+  }, [currentCard, updateStatsAndProgress]);
+
+  const handleMultipleChoice = useCallback(async (optionIndex: number) => {
+    if (!currentCard || showExplanation) return;
+    
+    setSelectedAnswer(optionIndex);
+    setShowExplanation(true);
+
+    const isCorrect = optionIndex === currentCard.correctAnswer;
+    
+    try {
+      const cardProgress = await getProgress(currentCard.id);
+      const newProgress = {
+        ...cardProgress,
+        correct: isCorrect ? cardProgress.correct + 1 : cardProgress.correct,
+        incorrect: isCorrect ? cardProgress.incorrect : cardProgress.incorrect + 1,
+        lastReview: new Date().toISOString(),
+        difficulty: isCorrect ? Math.max(0, cardProgress.difficulty - 1) : cardProgress.difficulty + 1
+      };
+      await saveProgress(currentCard.id, newProgress);
+
+      setProgress(prev => ({ ...prev, [currentCard.id]: newProgress }));
+      updateStatsAndProgress(isCorrect);
+    } catch (error) {
+      console.error('Failed to save progress:', error);
+    }
+  }, [currentCard, showExplanation, updateStatsAndProgress]);
+
+  const nextCard = useCallback(() => {
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
-    setCardHeight(null);
-    if (currentCardIndex < currentCards.length - 1) {
+    
+    if (filteredCards.length === 0) return;
+    
+    if (currentCardIndex < filteredCards.length - 1) {
       setCurrentCardIndex(prev => prev + 1);
     } else {
+      // Loop back to start
       setCurrentCardIndex(0);
     }
-  };
+  }, [currentCardIndex, filteredCards.length]);
 
-  const previousCard = () => {
+  const previousCard = useCallback(() => {
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
-    setCardHeight(null);
+    
+    if (filteredCards.length === 0) return;
+    
     if (currentCardIndex > 0) {
       setCurrentCardIndex(prev => prev - 1);
     } else {
-      setCurrentCardIndex(currentCards.length - 1);
+      // Go to last card
+      setCurrentCardIndex(filteredCards.length - 1);
     }
-  };
+  }, [currentCardIndex, filteredCards.length]);
 
-  const cardProgress = progress[currentCard?.id] || { correct: 0, incorrect: 0 };
+  const toggleDifficulty = useCallback((difficulty: string) => {
+    setSelectedDifficulties(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(difficulty)) {
+        // Prevent deselecting all difficulties
+        if (newSet.size > 1) {
+          newSet.delete(difficulty);
+        }
+      } else {
+        newSet.add(difficulty);
+      }
+      return newSet;
+    });
+    setCurrentCardIndex(0);
+    setIsFlipped(false);
+    setSelectedAnswer(null);
+    setShowExplanation(false);
+  }, []);
+
+  const toggleType = useCallback((type: string) => {
+    setSelectedTypes(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(type)) {
+        // Prevent deselecting all types
+        if (newSet.size > 1) {
+          newSet.delete(type);
+        }
+      } else {
+        newSet.add(type);
+      }
+      return newSet;
+    });
+    setCurrentCardIndex(0);
+    setIsFlipped(false);
+    setSelectedAnswer(null);
+    setShowExplanation(false);
+  }, []);
+
+  const toggleTopic = useCallback((topic: string) => {
+    setSelectedTopics(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(topic)) {
+        newSet.delete(topic);
+      } else {
+        newSet.add(topic);
+      }
+      return newSet;
+    });
+    setCurrentCardIndex(0);
+    setIsFlipped(false);
+    setSelectedAnswer(null);
+    setShowExplanation(false);
+  }, []);
+
+  const selectAllTopics = useCallback(() => {
+    setSelectedTopics(new Set(availableTopics));
+    setCurrentCardIndex(0);
+    setIsFlipped(false);
+  }, [availableTopics]);
+
+  const clearAllTopics = useCallback(() => {
+    // Don't clear if no topics selected (keep at least one for UX)
+    if (availableTopics.length > 0) {
+      setSelectedTopics(new Set());
+      setCurrentCardIndex(0);
+      setIsFlipped(false);
+    }
+  }, [availableTopics]);
+
+  const resetFilters = useCallback(() => {
+    setSelectedDifficulties(new Set(['fundamental', 'application', 'advanced']));
+    setSelectedTypes(new Set(['flashcard', 'multiple-choice', 'scenario', 'code-analysis', 'concept']));
+    setSelectedTopics(new Set(availableTopics));
+    setCurrentCardIndex(0);
+    setIsFlipped(false);
+    setSelectedAnswer(null);
+    setShowExplanation(false);
+  }, [availableTopics]);
+
+  const cardProgress = currentCard 
+    ? progress[currentCard.id] || { correct: 0, incorrect: 0 }
+    : { correct: 0, incorrect: 0 };
+    
   const masteryLevel = cardProgress.correct > 0
     ? Math.min(100, (cardProgress.correct / (cardProgress.correct + cardProgress.incorrect)) * 100)
     : 0;
+
+  // Show loading state
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 p-4 md:p-8 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading flashcards...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 p-4 md:p-8">
@@ -524,7 +706,7 @@ export default function SAAFlashcardApp() {
         </div>
       )}
 
-      {view === 'study' && currentCard && (
+      {view === 'study' && (
         <div className="max-w-2xl mx-auto">
           {/* Study Header */}
           <div className="mb-6 flex items-center justify-between">
@@ -537,204 +719,347 @@ export default function SAAFlashcardApp() {
               Back to tasks
             </Button>
             <div className="text-sm text-gray-500">
-              {currentCardIndex + 1} / {currentCards.length}
+              {filteredCards.length > 0 ? `${validCurrentIndex + 1} / ${filteredCards.length}` : '0 / 0'}
             </div>
           </div>
 
-          {/* Task Title */}
-          <div className="mb-6">
-            <h2 className="text-3xl font-bold text-gray-900 mb-2">{selectedTask?.name}</h2>
-            <div className="flex gap-2 flex-wrap">
-              <Badge className="bg-indigo-100 text-indigo-700 hover:bg-indigo-100">
-                {currentCard.topic}
-              </Badge>
-              <Badge
-                variant="outline"
-                className={
-                  currentCard.difficulty === 'fundamental'
-                    ? 'border-green-400 text-green-700 bg-green-50'
-                    : currentCard.difficulty === 'application'
-                    ? 'border-yellow-400 text-yellow-700 bg-yellow-50'
-                    : 'border-red-400 text-red-700 bg-red-50'
-                }
-              >
-                {currentCard.difficulty === 'fundamental' && '\u2B50'}
-                {currentCard.difficulty === 'application' && '\u2B50\u2B50'}
-                {currentCard.difficulty === 'advanced' && '\u2B50\u2B50\u2B50'}
-                {' '}{currentCard.difficulty}
-              </Badge>
-            </div>
-          </div>
-
-          {/* Progress Bar */}
-          <div className="mb-8">
-            <Progress value={(currentCardIndex / currentCards.length) * 100} className="h-2" />
-          </div>
-
-          {/* Flashcard or Multiple Choice */}
-          {currentCard.type === 'multiple-choice' ? (
-            <div className="study-card bg-white rounded-3xl p-8 mb-6">
-              <div className="flex items-center justify-center mb-6">
-                {currentCard.awsIcon ? (
-                  <div className="w-16 h-16">
-                    {(() => { const Icon = getAWSIcon(currentCard.awsIcon); return Icon ? <Icon /> : null; })()}
-                  </div>
-                ) : (
-                  <div className="text-6xl">{currentCard.icon}</div>
-                )}
-              </div>
-
-              <h3 className="text-2xl font-semibold text-gray-900 mb-8 text-center leading-relaxed px-4">
-                {currentCard.question}
-              </h3>
-
-              <div className="space-y-3">
-                {currentCard.options?.map((option, index) => {
-                  const isSelected = selectedAnswer === index;
-                  const isCorrect = index === currentCard.correctAnswer;
-                  const showResult = showExplanation;
-
-                  let buttonClass = "w-full p-4 text-left rounded-xl border-2 transition-all ";
-
-                  if (!showResult) {
-                    buttonClass += isSelected
-                      ? "border-indigo-500 bg-indigo-50"
-                      : "border-gray-200 hover:border-indigo-300 hover:bg-gray-50";
-                  } else {
-                    if (isCorrect) {
-                      buttonClass += "border-green-500 bg-green-50";
-                    } else if (isSelected) {
-                      buttonClass += "border-red-500 bg-red-50";
-                    } else {
-                      buttonClass += "border-gray-200 bg-gray-50";
+          {/* Task Title and Filter Button */}
+          <div className="mb-6 flex items-start justify-between">
+            <div>
+              <h2 className="text-3xl font-bold text-gray-900 mb-2">{selectedTask?.name}</h2>
+              {currentCard && (
+                <div className="flex gap-2 flex-wrap">
+                  <Badge className="bg-indigo-100 text-indigo-700 hover:bg-indigo-100">
+                    {currentCard.topic}
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className={
+                      currentCard.difficulty === 'fundamental'
+                        ? 'border-green-400 text-green-700 bg-green-50'
+                        : currentCard.difficulty === 'application'
+                        ? 'border-yellow-400 text-yellow-700 bg-yellow-50'
+                        : 'border-red-400 text-red-700 bg-red-50'
                     }
-                  }
-
-                  return (
-                    <button
-                      key={index}
-                      onClick={() => !showExplanation && handleMultipleChoice(index)}
-                      disabled={showExplanation}
-                      className={buttonClass}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium text-gray-900">
-                          {String.fromCharCode(65 + index)}. {option}
-                        </span>
-                        {showResult && isCorrect && <CheckCircle2 className="w-5 h-5 text-green-600" />}
-                        {showResult && isSelected && !isCorrect && <XCircle className="w-5 h-5 text-red-600" />}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {showExplanation && (
-                <div className={`mt-6 p-5 rounded-xl ${
-                  selectedAnswer === currentCard.correctAnswer
-                    ? 'bg-green-50 border border-green-200'
-                    : 'bg-red-50 border border-red-200'
-                }`}>
-                  <div className="flex items-start gap-3">
-                    {selectedAnswer === currentCard.correctAnswer ? (
-                      <CheckCircle2 className="w-6 h-6 text-green-600 flex-shrink-0 mt-0.5" />
-                    ) : (
-                      <XCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-0.5" />
-                    )}
-                    <div>
-                      <h4 className="font-semibold text-gray-900 mb-2">
-                        {selectedAnswer === currentCard.correctAnswer ? "Correct!" : "Not quite"}
-                      </h4>
-                      <p className="text-gray-700 leading-relaxed text-sm"
-                         dangerouslySetInnerHTML={{
-                           __html: currentCard.explanation?.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') ?? '<div></div>'
-                         }}
-                      />
-                    </div>
-                  </div>
+                  >
+                    {currentCard.difficulty === 'fundamental' && '\u2B50'}
+                    {currentCard.difficulty === 'application' && '\u2B50\u2B50'}
+                    {currentCard.difficulty === 'advanced' && '\u2B50\u2B50\u2B50'}
+                    {' '}{currentCard.difficulty}
+                  </Badge>
                 </div>
-              )}
-
-              {showExplanation && (
-                <Button
-                  onClick={nextCard}
-                  className="w-full mt-6 h-12 text-zinc-800 font-medium rounded-xl"
-                >
-                  Next question
-                  <ChevronRight className="w-5 h-5 ml-2" />
-                </Button>
               )}
             </div>
-          ) : (
-            <div className={`flip-card ${isFlipped ? 'flipped' : ''}`}>
-              <div 
-                className="flip-card-inner" 
-                style={{ 
-                  height: cardHeight ? `${cardHeight}px` : '400px',
-                  transition: 'transform 0.6s, height 0.3s ease'
-                }}
-              >
-                {/* Front */}
-                <div className="flip-card-front">
-                  <div
-                    ref={setFrontContentRef}
-                    className="study-card bg-white rounded-3xl p-8 cursor-pointer hover:shadow-lg transition-shadow"
-                    onClick={handleCardFlip}
-                    style={{ minHeight: '100%' }}
-                  >
-                    <div className="flex flex-col items-center justify-center min-h-full">
-                      {currentCard.awsIcon ? (
-                        <div className="w-20 h-20 mb-8">
-                          {(() => { const Icon = getAWSIcon(currentCard.awsIcon); return Icon ? <Icon /> : null; })()}
-                        </div>
-                      ) : (
-                        <div className="text-7xl mb-8">{currentCard.icon}</div>
-                      )}
-                      <h3 className="text-2xl font-semibold text-gray-900 text-center leading-relaxed px-4">
-                        {currentCard.question}
-                      </h3>
-                      <p className="text-sm text-gray-400 mt-8">Tap to reveal answer</p>
+            <Button
+              variant="outline"
+              onClick={() => setShowFilters(!showFilters)}
+              className="flex items-center gap-2"
+            >
+              <Filter className="w-4 h-4" />
+              Filters
+              {filteredCards.length !== allCards.length && allCards.length > 0 && (
+                <Badge className="ml-1 bg-indigo-100 text-indigo-700">
+                  {filteredCards.length}
+                </Badge>
+              )}
+            </Button>
+          </div>
+
+          {/* Filters Panel */}
+          {showFilters && (
+            <div className="mb-6 p-5 bg-white rounded-2xl shadow-sm border border-gray-200">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-gray-900">Filter Cards</h3>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowFilters(false)}
+                  className="h-8 w-8 p-0"
+                >
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
+
+              {/* Difficulty Filter */}
+              <div className="mb-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-2">Difficulty</h4>
+                <div className="flex flex-wrap gap-2">
+                  {['fundamental', 'application', 'advanced'].map(difficulty => (
+                    <Badge
+                      key={difficulty}
+                      variant={selectedDifficulties.has(difficulty) ? "default" : "outline"}
+                      className={`cursor-pointer capitalize ${
+                        selectedDifficulties.has(difficulty)
+                          ? difficulty === 'fundamental'
+                            ? 'bg-green-500 hover:bg-green-600'
+                            : difficulty === 'application'
+                            ? 'bg-yellow-500 hover:bg-yellow-600'
+                            : 'bg-red-500 hover:bg-red-600'
+                          : ''
+                      }`}
+                      onClick={() => toggleDifficulty(difficulty)}
+                    >
+                      {difficulty}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+
+              {/* Card Type Filter */}
+              <div className="mb-4">
+                <h4 className="text-sm font-medium text-gray-700 mb-2">Card Type</h4>
+                <div className="flex flex-wrap gap-2">
+                  {['flashcard', 'multiple-choice', 'scenario', 'code-analysis', 'concept'].map(type => (
+                    <Badge
+                      key={type}
+                      variant={selectedTypes.has(type) ? "default" : "outline"}
+                      className={`cursor-pointer capitalize ${
+                        selectedTypes.has(type) ? 'bg-indigo-500 hover:bg-indigo-600' : ''
+                      }`}
+                      onClick={() => toggleType(type)}
+                    >
+                      {type.replace('-', ' ')}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+
+              {/* Topic Filter */}
+              {availableTopics.length > 0 && (
+                <div className="mb-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-medium text-gray-700">Topics</h4>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={selectAllTopics}
+                        className="text-xs h-6 px-2"
+                        disabled={selectedTopics.size === availableTopics.length}
+                      >
+                        Select All
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={clearAllTopics}
+                        className="text-xs h-6 px-2"
+                        disabled={selectedTopics.size === 0}
+                      >
+                        Clear
+                      </Button>
                     </div>
                   </div>
-                </div>
-
-                {/* Back */}
-                <div className="flip-card-back">
-                  <div
-                    ref={setBackContentRef}
-                    className="study-card bg-gradient-to-br from-indigo-500 to-purple-600 text-white rounded-3xl p-8 cursor-pointer"
-                    onClick={handleCardFlip}
-                    style={{ minHeight: '100%' }}
-                  >
-                    <div className="flex flex-col min-h-full">
-                      <div className="prose prose-invert prose-lg max-w-none flex-grow">
-                        {currentCard.answer?.split('\n').map((line, i) => {
-                          if (line.includes('```')) return null;
-                          if (line.trim().startsWith('```')) return null;
-
-                          return (
-                            <p
-                              key={i}
-                              className="mb-3 leading-relaxed text-white/90"
-                              dangerouslySetInnerHTML={{
-                                __html: line
-                                  .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-semibold">$1</strong>')
-                                  .replace(/`(.*?)`/g, '<code class="bg-white/20 px-2 py-0.5 rounded text-sm">$1</code>')
-                              }}
-                            />
-                          );
-                        })}
-                      </div>
-                      <p className="text-sm text-white/60 mt-8 text-center">Tap to flip back</p>
-                    </div>
+                  <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto p-1">
+                    {availableTopics.map(topic => (
+                      <Badge
+                        key={topic}
+                        variant={selectedTopics.has(topic) ? "default" : "outline"}
+                        className={`cursor-pointer ${
+                          selectedTopics.has(topic) ? 'bg-indigo-500 hover:bg-indigo-600' : ''
+                        }`}
+                        onClick={() => toggleTopic(topic)}
+                      >
+                        {topic}
+                      </Badge>
+                    ))}
                   </div>
                 </div>
+              )}
+
+              {/* Filter Stats */}
+              <div className="mt-4 pt-3 border-t border-gray-100 text-sm text-gray-500">
+                {allCards.length > 0 ? (
+                  <>Showing {filteredCards.length} of {allCards.length} cards</>
+                ) : (
+                  <>No cards available</>
+                )}
               </div>
             </div>
           )}
 
+          {/* Progress Bar */}
+          {filteredCards.length > 0 && (
+            <div className="mb-8">
+              <Progress value={(validCurrentIndex / filteredCards.length) * 100} className="h-2" />
+            </div>
+          )}
+
+          {/* No Cards Message */}
+          {filteredCards.length === 0 ? (
+            <div className="study-card bg-white rounded-3xl p-12 mb-6 text-center">
+              <div className="text-6xl mb-4">😕</div>
+              <h3 className="text-2xl font-semibold text-gray-900 mb-2">No cards match your filters</h3>
+              <p className="text-gray-500 mb-6">Try adjusting your filter criteria to see more cards.</p>
+              <Button
+                onClick={resetFilters}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              >
+                Reset Filters
+              </Button>
+            </div>
+          ) : !currentCard ? (
+            <div className="study-card bg-white rounded-3xl p-12 mb-6 text-center">
+              <div className="text-6xl mb-4">🃏</div>
+              <h3 className="text-2xl font-semibold text-gray-900 mb-2">No card selected</h3>
+              <p className="text-gray-500">Something went wrong. Try going back and starting again.</p>
+            </div>
+          ) : (
+            /* Flashcard or Multiple Choice */
+            currentCard.type === 'multiple-choice' ? (
+              <div className="study-card bg-white rounded-3xl p-8 mb-6">
+                <div className="flex items-center justify-center mb-6">
+                  {currentCard.awsIcon ? (
+                    <div className="w-16 h-16">
+                      {(() => { const Icon = getAWSIcon(currentCard.awsIcon); return Icon ? <Icon /> : null; })()}
+                    </div>
+                  ) : (
+                    <div className="text-6xl">{currentCard.icon}</div>
+                  )}
+                </div>
+
+                <h3 className="text-2xl font-semibold text-gray-900 mb-8 text-center leading-relaxed px-4">
+                  {currentCard.question}
+                </h3>
+
+                <div className="space-y-3">
+                  {currentCard.options?.map((option, index) => {
+                    const isSelected = selectedAnswer === index;
+                    const isCorrect = index === currentCard.correctAnswer;
+                    const showResult = showExplanation;
+
+                    let buttonClass = "w-full p-4 text-left rounded-xl border-2 transition-all ";
+
+                    if (!showResult) {
+                      buttonClass += isSelected
+                        ? "border-indigo-500 bg-indigo-50"
+                        : "border-gray-200 hover:border-indigo-300 hover:bg-gray-50";
+                    } else {
+                      if (isCorrect) {
+                        buttonClass += "border-green-500 bg-green-50";
+                      } else if (isSelected) {
+                        buttonClass += "border-red-500 bg-red-50";
+                      } else {
+                        buttonClass += "border-gray-200 bg-gray-50";
+                      }
+                    }
+
+                    return (
+                      <button
+                        key={index}
+                        onClick={() => !showExplanation && handleMultipleChoice(index)}
+                        disabled={showExplanation}
+                        className={buttonClass}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-gray-900">
+                            {String.fromCharCode(65 + index)}. {option}
+                          </span>
+                          {showResult && isCorrect && <CheckCircle2 className="w-5 h-5 text-green-600" />}
+                          {showResult && isSelected && !isCorrect && <XCircle className="w-5 h-5 text-red-600" />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {showExplanation && (
+                  <div className={`mt-6 p-5 rounded-xl ${
+                    selectedAnswer === currentCard.correctAnswer
+                      ? 'bg-green-50 border border-green-200'
+                      : 'bg-red-50 border border-red-200'
+                  }`}>
+                    <div className="flex items-start gap-3">
+                      {selectedAnswer === currentCard.correctAnswer ? (
+                        <CheckCircle2 className="w-6 h-6 text-green-600 flex-shrink-0 mt-0.5" />
+                      ) : (
+                        <XCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-0.5" />
+                      )}
+                      <div>
+                        <h4 className="font-semibold text-gray-900 mb-2">
+                          {selectedAnswer === currentCard.correctAnswer ? "Correct!" : "Not quite"}
+                        </h4>
+                        <p className="text-gray-700 leading-relaxed text-sm"
+                           dangerouslySetInnerHTML={{
+                             __html: currentCard.explanation?.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') ?? '<div></div>'
+                           }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {showExplanation && (
+                  <Button
+                    onClick={nextCard}
+                    className="w-full mt-6 h-12 text-zinc-800 font-medium rounded-xl"
+                  >
+                    Next question
+                    <ChevronRight className="w-5 h-5 ml-2" />
+                  </Button>
+                )}
+              </div>
+            ) : (
+              <div className={`flip-card ${isFlipped ? 'flipped' : ''}`}>
+                <div className="flip-card-inner">
+                  {/* Front */}
+                  <div className="flip-card-front">
+                    <div
+                      className="study-card bg-white rounded-3xl p-8 cursor-pointer hover:shadow-lg transition-shadow min-h-[400px] flex items-center justify-center"
+                      onClick={handleCardFlip}
+                    >
+                      <div className="text-center">
+                        {currentCard.awsIcon ? (
+                          <div className="w-20 h-20 mx-auto mb-8">
+                            {(() => { const Icon = getAWSIcon(currentCard.awsIcon); return Icon ? <Icon /> : null; })()}
+                          </div>
+                        ) : (
+                          <div className="text-7xl mb-8">{currentCard.icon}</div>
+                        )}
+                        <h3 className="text-2xl font-semibold text-gray-900 leading-relaxed px-4">
+                          {currentCard.question}
+                        </h3>
+                        <p className="text-sm text-gray-400 mt-8">Tap to reveal answer</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Back */}
+                  <div className="flip-card-back">
+                    <div
+                      className="study-card bg-gradient-to-br from-indigo-500 to-purple-600 text-white rounded-3xl p-8 cursor-pointer min-h-[400px] flex items-center justify-center"
+                      onClick={handleCardFlip}
+                    >
+                      <div className="text-center">
+                        <div className="prose prose-invert prose-lg max-w-none">
+                          {currentCard.answer?.split('\n').map((line, i) => {
+                            if (line.includes('```')) return null;
+                            if (line.trim().startsWith('```')) return null;
+
+                            return (
+                              <p
+                                key={i}
+                                className="mb-3 leading-relaxed text-white/90"
+                                dangerouslySetInnerHTML={{
+                                  __html: line
+                                    .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-semibold">$1</strong>')
+                                    .replace(/`(.*?)`/g, '<code class="bg-white/20 px-2 py-0.5 rounded text-sm">$1</code>')
+                                }}
+                              />
+                            );
+                          })}
+                        </div>
+                        <p className="text-sm text-white/60 mt-8">Tap to flip back</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )
+          )}
+
           {/* Action Buttons for Flashcards */}
-          {isFlipped && currentCard.type !== 'multiple-choice' && (
+          {isFlipped && currentCard?.type !== 'multiple-choice' && filteredCards.length > 0 && (
             <div className="grid grid-cols-2 gap-4 mt-6">
               <Button
                 onClick={handleLearning}
@@ -753,7 +1078,7 @@ export default function SAAFlashcardApp() {
           )}
 
           {/* Navigation */}
-          {!isFlipped && currentCard.type !== 'multiple-choice' && (
+          {!isFlipped && currentCard?.type !== 'multiple-choice' && filteredCards.length > 0 && (
             <div className="flex justify-between mt-6">
               <Button
                 onClick={previousCard}
@@ -775,11 +1100,13 @@ export default function SAAFlashcardApp() {
           )}
 
           {/* Card Progress */}
-          <div className="mt-8 text-center">
-            <p className="text-sm text-gray-500">
-              Reviewed {cardProgress.correct + cardProgress.incorrect} times • Mastery: {masteryLevel.toFixed(0)}%
-            </p>
-          </div>
+          {currentCard && (
+            <div className="mt-8 text-center">
+              <p className="text-sm text-gray-500">
+                Reviewed {cardProgress.correct + cardProgress.incorrect} times • Mastery: {masteryLevel.toFixed(0)}%
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>
