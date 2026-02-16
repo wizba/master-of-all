@@ -68,6 +68,14 @@ export default function SAAFlashcardApp() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [showInstallButton, setShowInstallButton] = useState(false);
+  const [cardHeight, setCardHeight] = useState<number | null>(null);
+  const [frontContentRef, setFrontContentRef] = useState<HTMLDivElement | null>(null);
+  const [backContentRef, setBackContentRef] = useState<HTMLDivElement | null>(null);
+
+    // Get cards for the selected task
+  const selectedTask = selectedDomain?.tasks.find(t => t.id === selectedTaskId);
+  const currentCards = selectedTask?.cards || [];
+  const currentCard = currentCards[currentCardIndex];
 
   // PWA Install Prompt
   useEffect(() => {
@@ -81,6 +89,20 @@ export default function SAAFlashcardApp() {
 
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
+
+  // Measure and set consistent card height
+  useEffect(() => {
+    if (currentCard?.type !== 'multiple-choice') {
+      if (frontContentRef && backContentRef) {
+        const frontHeight = frontContentRef.scrollHeight;
+        const backHeight = backContentRef.scrollHeight;
+        const maxHeight = Math.max(frontHeight, backHeight, 400);
+        (()=>setCardHeight(maxHeight))()
+      }
+    } else {
+      (()=>setCardHeight(null))();
+    }
+  }, [currentCard, frontContentRef, backContentRef, isFlipped]);
 
   const handleInstallClick = async () => {
     if (!deferredPrompt) return;
@@ -100,10 +122,7 @@ export default function SAAFlashcardApp() {
     return domain.tasks.flatMap(t => t.cards);
   };
 
-  // Get cards for the selected task
-  const selectedTask = selectedDomain?.tasks.find(t => t.id === selectedTaskId);
-  const currentCards = selectedTask?.cards || [];
-  const currentCard = currentCards[currentCardIndex];
+
 
   // Load progress on mount
   useEffect(() => {
@@ -128,6 +147,7 @@ export default function SAAFlashcardApp() {
     setView('study');
     setCurrentCardIndex(0);
     setIsFlipped(false);
+    setCardHeight(null);
   };
 
   const backToPacks = () => {
@@ -137,6 +157,7 @@ export default function SAAFlashcardApp() {
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
+    setCardHeight(null);
   };
 
   const backToTasks = () => {
@@ -145,6 +166,7 @@ export default function SAAFlashcardApp() {
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
+    setCardHeight(null);
   };
 
   const handleCardFlip = () => {
@@ -220,6 +242,7 @@ export default function SAAFlashcardApp() {
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
+    setCardHeight(null);
     if (currentCardIndex < currentCards.length - 1) {
       setCurrentCardIndex(prev => prev + 1);
     } else {
@@ -231,6 +254,7 @@ export default function SAAFlashcardApp() {
     setIsFlipped(false);
     setSelectedAnswer(null);
     setShowExplanation(false);
+    setCardHeight(null);
     if (currentCardIndex > 0) {
       setCurrentCardIndex(prev => prev - 1);
     } else {
@@ -634,7 +658,7 @@ export default function SAAFlashcardApp() {
               {showExplanation && (
                 <Button
                   onClick={nextCard}
-                  className="w-full mt-6 h-12 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl"
+                  className="w-full mt-6 h-12 text-zinc-800 font-medium rounded-xl"
                 >
                   Next question
                   <ChevronRight className="w-5 h-5 ml-2" />
@@ -643,15 +667,22 @@ export default function SAAFlashcardApp() {
             </div>
           ) : (
             <div className={`flip-card ${isFlipped ? 'flipped' : ''}`}>
-              <div className="flip-card-inner" style={{ minHeight: '400px' }}>
+              <div 
+                className="flip-card-inner" 
+                style={{ 
+                  height: cardHeight ? `${cardHeight}px` : '400px',
+                  transition: 'transform 0.6s, height 0.3s ease'
+                }}
+              >
                 {/* Front */}
                 <div className="flip-card-front">
                   <div
+                    ref={setFrontContentRef}
                     className="study-card bg-white rounded-3xl p-8 cursor-pointer hover:shadow-lg transition-shadow"
                     onClick={handleCardFlip}
-                    style={{ minHeight: '400px' }}
+                    style={{ minHeight: '100%' }}
                   >
-                    <div className="flex flex-col items-center justify-center h-full">
+                    <div className="flex flex-col items-center justify-center min-h-full">
                       {currentCard.awsIcon ? (
                         <div className="w-20 h-20 mb-8">
                           {(() => { const Icon = getAWSIcon(currentCard.awsIcon); return Icon ? <Icon /> : null; })()}
@@ -670,29 +701,32 @@ export default function SAAFlashcardApp() {
                 {/* Back */}
                 <div className="flip-card-back">
                   <div
+                    ref={setBackContentRef}
                     className="study-card bg-gradient-to-br from-indigo-500 to-purple-600 text-white rounded-3xl p-8 cursor-pointer"
                     onClick={handleCardFlip}
-                    style={{ minHeight: '400px' }}
+                    style={{ minHeight: '100%' }}
                   >
-                    <div className="prose prose-invert prose-lg max-w-none">
-                      {currentCard.answer?.split('\n').map((line, i) => {
-                        if (line.includes('```')) return null;
-                        if (line.trim().startsWith('```')) return null;
+                    <div className="flex flex-col min-h-full">
+                      <div className="prose prose-invert prose-lg max-w-none flex-grow">
+                        {currentCard.answer?.split('\n').map((line, i) => {
+                          if (line.includes('```')) return null;
+                          if (line.trim().startsWith('```')) return null;
 
-                        return (
-                          <p
-                            key={i}
-                            className="mb-3 leading-relaxed text-white/90"
-                            dangerouslySetInnerHTML={{
-                              __html: line
-                                .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-semibold">$1</strong>')
-                                .replace(/`(.*?)`/g, '<code class="bg-white/20 px-2 py-0.5 rounded text-sm">$1</code>')
-                            }}
-                          />
-                        );
-                      })}
+                          return (
+                            <p
+                              key={i}
+                              className="mb-3 leading-relaxed text-white/90"
+                              dangerouslySetInnerHTML={{
+                                __html: line
+                                  .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-semibold">$1</strong>')
+                                  .replace(/`(.*?)`/g, '<code class="bg-white/20 px-2 py-0.5 rounded text-sm">$1</code>')
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                      <p className="text-sm text-white/60 mt-8 text-center">Tap to flip back</p>
                     </div>
-                    <p className="text-sm text-white/60 mt-8">Tap to flip back</p>
                   </div>
                 </div>
               </div>
